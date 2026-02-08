@@ -41,6 +41,7 @@ self.onmessage = async (e) => {
                 }
             });
 
+            console.log('Worker: Configuring VideoEncoder with', videoConfig);
             videoEncoder.configure(videoConfig);
 
             self.postMessage({ type: 'configured' });

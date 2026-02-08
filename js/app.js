@@ -235,41 +235,61 @@ class App {
         
         console.log('Timeline panel initial height:', timelinePanel.offsetHeight);
         
-        let isDragging = false;
-        let startY = 0;
-        let startHeight = 0;
-
-        splitter.addEventListener('mousedown', (e) => {
+        const onStart = (clientY) => {
             isDragging = true;
-            startY = e.clientY;
+            startY = clientY;
             startHeight = timelinePanel.offsetHeight;
             document.body.style.cursor = 'row-resize';
-            e.preventDefault(); // Prevent text selection
-        });
+        };
 
-        document.addEventListener('mousemove', (e) => {
+        const onMove = (clientY) => {
             if (!isDragging) return;
-
-            const deltaY = startY - e.clientY; // Drag up increases height
+            const deltaY = startY - clientY;
             const newHeight = Math.max(100, Math.min(window.innerHeight - 100, startHeight + deltaY));
-            
             timelinePanel.style.height = `${newHeight}px`;
             
-            // Trigger resize updates
             if (this.mapManager && this.mapManager.map) {
                 this.mapManager.map.invalidateSize();
             }
             if (this.timelineEditor) {
                 this.timelineEditor.resizeCanvas();
             }
-        });
+        };
 
-        document.addEventListener('mouseup', () => {
+        const onEnd = () => {
              if (isDragging) {
                 isDragging = false;
                 document.body.style.cursor = 'default';
              }
+        };
+
+        // Mouse Events
+        splitter.addEventListener('mousedown', (e) => {
+            onStart(e.clientY);
+            e.preventDefault();
         });
+
+        document.addEventListener('mousemove', (e) => onMove(e.clientY));
+        document.addEventListener('mouseup', onEnd);
+
+        // Touch Events
+        splitter.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 0) {
+                onStart(e.touches[0].clientY);
+                // Don't preventDefault here to allow scrolling if needed, 
+                // but for a splitter drag, we usually want to prevent other actions.
+                e.preventDefault(); 
+            }
+        }, { passive: false });
+
+        document.addEventListener('touchmove', (e) => {
+            if (isDragging && e.touches.length > 0) {
+                onMove(e.touches[0].clientY);
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        document.addEventListener('touchend', onEnd);
     }
 
     setupProjectControls() {
