@@ -56,6 +56,7 @@ body {
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   cursor: row-resize;
   flex-shrink: 0;
+  touch-action: none;
 }
 
 #timeline-splitter:hover {
@@ -72,6 +73,7 @@ body {
   flex-shrink: 0;
   color: white;
   overflow: hidden;
+  touch-action: none;
 }
 
 /* Property Panel Internal */

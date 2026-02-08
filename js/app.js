@@ -235,6 +235,10 @@ class App {
         
         console.log('Timeline panel initial height:', timelinePanel.offsetHeight);
         
+        let isDragging = false;
+        let startY = 0;
+        let startHeight = 0;
+
         const onStart = (clientY) => {
             isDragging = true;
             startY = clientY;
