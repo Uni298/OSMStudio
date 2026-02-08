@@ -1,0 +1,27 @@
+{
+  "name": "earth-studio-clone",
+  "version": "1.0.0",
+  "description": "CesiumJS-based keyframe animation system with video export",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js"
+  },
+  "keywords": [
+    "cesium",
+    "animation",
+    "keyframe",
+    "video",
+    "3d"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "body-parser": "^2.2.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "fluent-ffmpeg": "^2.1.2",
+    "multer": "^1.4.5-lts.1",
+    "puppeteer": "^24.36.1"
+  }
+}
