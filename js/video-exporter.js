@@ -1,4 +1,4 @@
-// Video Exporter - Handles frame capture and video generation
+// Video Exporter - Handles frame capture and video generation (Pure Client-Side with Web Worker)
 export class VideoExporter {
     constructor(mapManager, animationController, keyframeManager) {
         this.mapManager = mapManager;
@@ -7,14 +7,13 @@ export class VideoExporter {
 
         this.isExporting = false;
         this.exportProgress = 0;
-        this.capturedFrames = [];
-
+        
         // Use current origin to support access from other devices (e.g., iPad)
         this.serverUrl = window.location.origin;
 
         this.initializeUI();
     }
-
+    
     initializeUI() {
         this.dialog = document.getElementById('export-dialog');
         this.btnExport = document.getElementById('btn-export');
@@ -26,6 +25,8 @@ export class VideoExporter {
         this.resolutionSelect = document.getElementById('export-resolution');
         this.fpsSelect = document.getElementById('export-fps');
         this.qualitySelect = document.getElementById('export-quality');
+        this.concurrencyInput = document.getElementById('export-concurrency');
+        this.waitTimeInput = document.getElementById('export-wait-time');
 
         this.progressContainer = document.getElementById('export-progress');
         this.progressFill = document.getElementById('export-progress-fill');
@@ -35,11 +36,27 @@ export class VideoExporter {
         // Bind events
         this.btnExport.addEventListener('click', () => this.showDialog());
         this.btnStartExport.addEventListener('click', () => this.startExport());
-        this.btnServerExport.addEventListener('click', () => this.startServerExport());
+        
+        // Disable server export for now as we are moving to client-side
+        // if (this.btnServerExport) {
+        //     this.btnServerExport.style.display = 'none'; 
+        // }
+        
+        if (this.btnServerExport) {
+            this.btnServerExport.style.display = 'inline-block';
+            this.btnServerExport.addEventListener('click', () => this.startHybridParallelExport());
+        }
+
         this.btnCancelExport.addEventListener('click', () => {
-            this.isExporting = false; // Trigger cancellation in loop
-            this.hideDialog();
+            if (this.isExporting) {
+                if (confirm('エクスポートを中止しますか？')) {
+                    this.isExporting = false; // Trigger cancellation in loop
+                }
+            } else {
+                this.hideDialog();
+            }
         });
+
         this.btnCloseDialog.addEventListener('click', () => {
             if (this.isExporting) {
                 if (confirm('エクスポートを中止しますか？')) {
@@ -71,27 +88,63 @@ export class VideoExporter {
         // Get export settings
         const resolution = this.resolutionSelect.value.split('x').map(Number);
         const fps = parseInt(this.fpsSelect.value);
-        const quality = this.qualitySelect.value;
+        const quality = this.qualitySelect.value; 
 
         const width = resolution[0];
         const height = resolution[1];
         const duration = this.animationController.duration;
         const totalFrames = Math.ceil(duration * fps);
 
+        // Bitrate calculation (Approximate)
+        let bitrate = 8000000; // 8 Mbps default (Medium)
+        if (quality === 'ultra') bitrate = 50000000; // 50 Mbps
+        if (quality === 'high') bitrate = 25000000; // 25 Mbps
+        if (quality === 'low') bitrate = 3000000;   // 3 Mbps
+        if (width >= 3840) bitrate *= 2.5; // 4K needs more but scaled less since base is high
+
         this.isExporting = true;
         this.progressContainer.style.display = 'block';
         this.btnStartExport.disabled = true;
 
         if (this.pathVisualizer) {
-            this.pathVisualizer.setEnabled(false);
+             this.pathVisualizer.setEnabled(false);
         }
 
+        let container = null;
+        let originalStyle = null;
+        let worker = null;
+
         try {
-            // 1. Start Export Session
-            this.updateProgress(0, 'エクスポート準備中...');
-            const startResponse = await fetch(`${this.serverUrl}/export/start`, { method: 'POST' });
-            if (!startResponse.ok) throw new Error('サーバー接続エラー');
-            const { sessionId } = await startResponse.json();
+            this.updateProgress(0, 'エンコーダー初期化中 (Worker)...');
+
+            // Initialize Worker
+            worker = new Worker('js/video-encoder-worker.js', { type: 'module' });
+            
+            // Determine codec
+            let codec = 'avc1.4d002a'; // High Profile Level 4.2
+            if (width * height > 1920 * 1080) {
+                codec = 'avc1.640033'; // High Profile Level 5.1
+            }
+
+            // Configure Worker
+            worker.postMessage({
+                type: 'configure',
+                payload: {
+                    width,
+                    height,
+                    fps,
+                    bitrate,
+                    codec
+                }
+            });
+
+            // Wait for configuration
+            await new Promise((resolve, reject) => {
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'configured') resolve();
+                    else if (e.data.type === 'error') reject(new Error(e.data.error));
+                };
+            });
 
             // Pause animation
             const wasPlaying = this.animationController.getIsPlaying();
@@ -99,10 +152,10 @@ export class VideoExporter {
                 this.animationController.pause();
             }
 
-            // Save original viewer size and style
+            // Save original styles
             const viewer = this.mapManager.getViewer();
-            const container = document.getElementById(this.mapManager.containerId);
-            const originalStyle = {
+            container = document.getElementById(this.mapManager.containerId);
+            originalStyle = {
                 width: container.style.width,
                 height: container.style.height,
                 position: container.style.position,
@@ -111,277 +164,280 @@ export class VideoExporter {
                 zIndex: container.style.zIndex
             };
 
-            // Resize viewer and force layout
-            // Use fixed positioning to ignore parent layout constraints
+            // Force fixed layout for capture
             container.style.position = 'fixed';
             container.style.top = '0';
             container.style.left = '0';
             container.style.width = width + 'px';
             container.style.height = height + 'px';
             container.style.zIndex = '9999';
-            
             this.mapManager.resize();
 
-            // 2. Capture and Upload Loop (Batched)
-            let frameBuffer = [];
-            const BATCH_SIZE = 5; // Send 5 frames at once
-            const apiEndpoint = `${this.serverUrl}/export/frame-batch`;
-            const uploadPromises = []; // Track active uploads
-
+            // Capture Loop
             for (let frame = 0; frame < totalFrames; frame++) {
                 if (!this.isExporting) throw new Error('Export Cancelled');
 
                 const time = (frame / fps);
-
-                // Update camera
-                const cameraData = this.keyframeManager.interpolateAt(time);
-                // Use animate:false to ensure exact positioning for frame capture
-                // This prevents "moving target" jitter during export
-                this.mapManager.setCameraPosition(cameraData, false);
-
-                // Wait for tiles
-                await this.waitForTiles();
-
-                // CRITICAL: Wait for browser paint
-                // requestAnimationFrame ensures layout/paint is done for current frame
-                await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
                 
-                // Extra yield for UI updates (progress bar)
-                await new Promise(r => setTimeout(r, 10));
+                // Update camera & Wait for render
+                const cameraData = this.keyframeManager.interpolateAt(time);
+                this.mapManager.setCameraPosition(cameraData, false);
+                const waitTime = parseInt(this.waitTimeInput?.value) || 300;
+                await this.waitForTiles(waitTime);
+                
+                // Wait for paint
+                await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                await new Promise(r => setTimeout(r, 10)); // Yield for UI updates
 
-                // Capture
+                // Capture using html2canvas
                 const canvas = await html2canvas(container, {
-                    useCORS: true,
+                    useCORS: true, 
                     allowTaint: true,
                     width: width,
                     height: height,
                     scale: 1,
-                    logging: false
-                });
-                
-                const frameData = canvas.toDataURL('image/png'); // Base64 for JSON batching
-
-                frameBuffer.push({
-                    index: frame,
-                    image: frameData
+                    logging: false,
+                    backgroundColor: null
                 });
 
-                // Update progress
-                if (frame % 5 === 0 || frame === totalFrames - 1) {
-                    const progress = ((frame + 1) / totalFrames) * 80;
-                    this.updateProgress(progress, `フレーム処理中... (${frame + 1}/${totalFrames})`);
-                }
+                // Create ImageBitmap (Efficient Transfer)
+                const bitmap = await createImageBitmap(canvas);
 
-                // If buffer full or last frame, upload
-                if (frameBuffer.length >= BATCH_SIZE || frame === totalFrames - 1) {
-                    const batch = [...frameBuffer];
-                    frameBuffer = []; // Clear buffer immediately
+                // Send to Worker
+                const timestamp = frame * (1000000 / fps); 
+                const keyFrame = frame % (fps * 2) === 0;
 
-                    // Async Upload (Fire and Forget but track)
-                    const p = fetch(apiEndpoint, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ sessionId, frames: batch })
-                    }).catch(err => {
-                        console.error('Batch upload failed', err);
-                        this.isExporting = false; // Stop on error
-                    });
-                    
-                    uploadPromises.push(p);
-                    
-                    // Manage concurrency to avoid memory explosion (e.g. max 50 pending batches)
-                    if (uploadPromises.length > 50) {
-                         const done = await Promise.race(uploadPromises);
-                         // Ideally remove done promise but for simplicity just await race
+                worker.postMessage({
+                    type: 'encode',
+                    payload: {
+                        bitmap: bitmap,
+                        timestamp: timestamp,
+                        keyFrame: keyFrame
                     }
-                    
-                    // Small yield to let network request start
-                    await new Promise(r => setTimeout(r, 0));
-                }
+                }, [bitmap]); // Transfer bitmap ownership to worker
+
+                // Update Progress
+                const progress = ((frame + 1) / totalFrames) * 100;
+                this.updateProgress(progress, `フレーム処理中... (${frame + 1}/${totalFrames})`);
             }
+
+            // Finalize
+            this.updateProgress(100, '動画ファイルの生成中...');
             
-            // Wait for all uploads to complete
-            this.updateProgress(80, 'アップロード完了待ち...');
-            await Promise.all(uploadPromises);
+            // Request finalization
+            worker.postMessage({ type: 'finalize' });
 
-            // Restore viewer style
-            container.style.width = originalStyle.width;
-            container.style.height = originalStyle.height;
-            container.style.position = originalStyle.position;
-            container.style.top = originalStyle.top;
-            container.style.left = originalStyle.left;
-            container.style.zIndex = originalStyle.zIndex;
-            
-            this.mapManager.resize();
-
-            // Reset animation
-            this.animationController.seekTo(0);
-            if (wasPlaying) this.animationController.play();
-
-            // 3. Finish and Encode
-            this.updateProgress(80, '動画をエンコード中... (数秒〜数分かかります)');
-
-            const finishResponse = await fetch(`${this.serverUrl}/export/finish`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    sessionId: sessionId,
-                    fps: fps,
-                    quality: quality
-                })
+            // Wait for completion
+            const buffer = await new Promise((resolve, reject) => {
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'complete') resolve(e.data.buffer);
+                    else if (e.data.type === 'error') reject(new Error(e.data.error));
+                };
             });
 
-            if (!finishResponse.ok) throw new Error('エンコードエラー');
-
-            const blob = await finishResponse.blob();
-
-            // Download video
+            const blob = new Blob([buffer], { type: 'video/mp4' });
+            
+            // Download
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `animation_${Date.now()}.mp4`;
+            a.download = `OSMStudio_${new Date().toISOString().replace(/[:.]/g, '-')}.mp4`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
 
-            this.updateProgress(100, 'エクスポート完了！');
-
-            setTimeout(() => {
-                this.isExporting = false;
-                this.btnStartExport.disabled = false;
-                this.hideDialog();
-                if (this.pathVisualizer) {
-                    this.pathVisualizer.setEnabled(true);
-                }
-            }, 2000);
+            alert('エクスポートが完了しました！');
+            this.hideDialog();
 
         } catch (error) {
-            console.error('Export error:', error);
-            this.updateProgress(0, 'エラー: ' + error.message);
+            console.error('Export failed:', error);
+            alert('エクスポート失敗: ' + error.message);
+        } finally {
+            // Cleanup
+            if (worker) {
+                worker.terminate();
+            }
+
+            if (container && originalStyle) {
+                container.style.width = originalStyle.width;
+                container.style.height = originalStyle.height;
+                container.style.position = originalStyle.position;
+                container.style.top = originalStyle.top;
+                container.style.left = originalStyle.left;
+                container.style.zIndex = originalStyle.zIndex;
+                this.mapManager.resize();
+            }
+
             this.isExporting = false;
             this.btnStartExport.disabled = false;
-
+            if (this.btnServerExport) this.btnServerExport.disabled = false;
+            this.progressContainer.style.display = 'none';
+            
             if (this.pathVisualizer) {
                 this.pathVisualizer.setEnabled(true);
             }
-
-            const container = document.getElementById(this.mapManager.containerId);
-            if (container) {
-                container.style.width = '100%';
-                container.style.height = '100%';
-                this.mapManager.resize();
-            }
-        }
-    }
-
-    async waitForTiles() {
-        // Smart wait: Check if tiles are loading
-        const layer = this.mapManager.activeLayer;
-        
-        let isReady = false;
-        let attempts = 0;
-        const maxAttempts = 100; // Total 2s max
-
-        // Aggressive flow: Check immediately
-        // Minimal buffer for initial render trigger
-        await new Promise(r => setTimeout(r, 10));
-
-        while (!isReady && attempts < maxAttempts) {
-            const loading = layer.isLoading ? layer.isLoading() : false;
-            const tilesToLoad = layer._tilesToLoad || 0;
             
-            if (!loading && tilesToLoad === 0) {
-                isReady = true;
-            } else {
-                // Short check interval
-                await new Promise(r => setTimeout(r, 20)); 
-                attempts++;
-            }
+            // Reset animation
+            this.animationController.seekTo(0);
+        }
+    }
+
+    async waitForTiles(additionalWait = 300) {
+        return new Promise((resolve) => {
+            const viewer = this.mapManager.getViewer();
+            if (!viewer) return resolve();
+
+            const check = () => {
+                let loading = false;
+                viewer.eachLayer((layer) => {
+                    // Check if it's a TileLayer and if it has loading tiles
+                    if (layer instanceof L.TileLayer && layer._loading) {
+                        loading = true;
+                    }
+                });
+                
+                if (!loading) {
+                    // Even if not "loading", wait a tiny bit more for potential flicker/texture upload
+                    setTimeout(resolve, additionalWait);
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            
+            check();
+            // Fallback to resolve after 3 seconds to avoid infinite loop
+            setTimeout(resolve, 3000);
+        });
+    }
+
+    async startHybridParallelExport() {
+        if (this.isExporting) return;
+
+        // Check if server is reachable
+        try {
+            await fetch(this.serverUrl + '/export/server/check', { method: 'HEAD' }).catch(() => {});
+        } catch (e) {
+            // Likely static hosting
         }
         
-    }
-    
-    // Server export uses Puppeteer, which works fine with DOM
-    async startServerExport() {
-        if (this.isExporting) return;
+        // Settings
+        const resolution = this.resolutionSelect.value; // e.g., "1920x1080"
+        const [width, height] = resolution.split('x').map(Number);
+        const fps = parseInt(this.fpsSelect.value);
+        const quality = this.qualitySelect.value;
+        const duration = this.animationController.duration;
+
+        // Bitrate calculation
+        let bitrate = 10000000;
+        if (quality === 'ultra') bitrate = 50000000;
+        if (quality === 'high') bitrate = 25000000;
+        if (quality === 'low') bitrate = 3000000;
+        if (width >= 3840) bitrate *= 2.5;
+
+        if (!confirm(`サーバーサイド並列キャプチャを開始します。\n\n※ Node.jsサーバーが起動している必要があります。\n※ 解像度: ${resolution}, FPS: ${fps}\n\nよろしいですか？`)) return;
+
         this.isExporting = true;
         this.progressContainer.style.display = 'block';
         this.btnStartExport.disabled = true;
-        document.getElementById('btn-server-export').disabled = true;
+        this.btnServerExport.disabled = true;
+
+        let worker = null;
 
         try {
-            // 1. Initial Request
-            const keyframes = this.keyframeManager.getAllKeyframes();
-            const duration = this.animationController.duration;
-            const fps = parseInt(this.fpsSelect.value);
-            const resolution = this.resolutionSelect.value;
-            const quality = this.qualitySelect.value;
+            // 1. Request Server Capture
+            this.updateProgress(0, 'サーバー処理を開始しています... (並列キャプチャ)');
 
-            this.updateProgress(0, 'サーバー処理を開始中...');
-
-            const startRes = await fetch(`${this.serverUrl}/export/server/start`, {
+            const keyframes = this.keyframeManager.getKeyframes();
+            
+            const startResponse = await fetch('/export/server/hybrid-start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keyframes, duration, fps, resolution, quality })
+                body: JSON.stringify({
+                    keyframes,
+                    duration,
+                    fps,
+                    resolution,
+                    quality,
+                    concurrency: parseInt(this.concurrencyInput.value) || 4,
+                    waitTime: parseInt(this.waitTimeInput.value) || 500
+                })
             });
 
-            if (!startRes.ok) throw new Error('Server start failed');
-            const { sessionId } = await startRes.json();
+            if (!startResponse.ok) {
+                const err = await startResponse.json();
+                throw new Error(err.error || 'Server request failed');
+            }
 
-            // 2. Polling Loop
-            await new Promise((resolve, reject) => {
-                const interval = setInterval(async () => {
-                    // Check cancellation
-                    if (!this.isExporting) {
-                        clearInterval(interval);
-                        // Optional: Notify server to cancel
-                        reject(new Error('Cancelled'));
-                        return;
-                    }
+            const { sessionId } = await startResponse.json();
+            console.log('Hybrid Export Session ID:', sessionId);
 
+            // 2. Poll for Progress
+            let isServerDone = false;
+            while (!isServerDone && this.isExporting) {
+                await new Promise(r => setTimeout(r, 1000));
+                
+                const statusRes = await fetch(`/export/server/status/${sessionId}`);
+                
+                if (!statusRes.ok) {
+                    let errorMessage = `Server Error: ${statusRes.status}`;
                     try {
-                        const statusRes = await fetch(`${this.serverUrl}/export/server/status/${sessionId}`);
-                        if (!statusRes.ok) {
-                            clearInterval(interval);
-                            throw new Error('Status check failed');
-                        }
-
-                        const status = await statusRes.json();
-
-                        if (status.status === 'failed') {
-                            clearInterval(interval);
-                            throw new Error(status.error || 'Server processing failed');
-                        }
-
-                        this.updateProgress(status.progress, status.message);
-
-                        if (status.status === 'completed') {
-                            clearInterval(interval);
-
-                            // 3. Download
-                            this.updateProgress(100, 'ダウンロード中...');
-                            window.location.href = `${this.serverUrl}/export/server/download/${sessionId}`;
-                            resolve();
-
-                            setTimeout(() => this.hideDialog(), 1000);
-                        }
-
-                    } catch (err) {
-                        clearInterval(interval);
-                        reject(err);
+                        const errData = await statusRes.json();
+                        if (errData.error) errorMessage = errData.error;
+                            // Add debug info if available
+                        if (errData.debug_existingKeys) errorMessage += ` (Existing: ${errData.debug_existingKeys})`;
+                    } catch (e) {
+                        // Ignore json parse error
                     }
-                }, 1000); // Poll every second
-            });
+                    throw new Error(errorMessage);
+                }
+
+                const status = await statusRes.json();
+                
+                // Display detailed progress
+                let progressPercent = status.progress || 0;
+                let message = status.message || 'Processing...';
+                
+                if (status.status === 'processing') {
+                    message = `サーバーでキャプチャ中: ${message}`;
+                } else if (status.status === 'encoding') {
+                    message = `動画エンコード中: ${message}`;
+                }
+                
+                this.updateProgress(progressPercent, message);
+
+                if (status.status === 'completed') {
+                    isServerDone = true;
+                } else if (status.status === 'error') {
+                    throw new Error(status.message || 'Server export failed');
+                }
+            }
+
+            if (!this.isExporting) throw new Error('Export cancelled');
+
+            // 3. Download completed video
+            this.updateProgress(100, 'ダウンロード中...');
+            
+            const downloadUrl = `/export/server/download/${sessionId}`;
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = `OSMStudio_Server_${sessionId}.mp4`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            alert('サーバーエクスポート完了！');
+            this.hideDialog();
 
         } catch (error) {
-            console.error('Server export error:', error);
-            this.updateProgress(0, 'エラー: ' + error.message);
-            alert('サーバーエクスポートエラー: ' + error.message);
+            console.error(error);
+            alert('エクスポート失敗: ' + error.message);
         } finally {
+            if (worker) worker.terminate();
             this.isExporting = false;
             this.btnStartExport.disabled = false;
-            document.getElementById('btn-server-export').disabled = false;
+            this.btnServerExport.disabled = false;
+            this.progressContainer.style.display = 'none';
         }
     }
 

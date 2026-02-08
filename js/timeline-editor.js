@@ -15,6 +15,8 @@ export class TimelineEditor {
         this.playheadDragging = false;
         this.currentTrackHeight = 24;
         this.currentTrackSpacing = 4;
+        this.scrollY = 0;
+        this.maxScrollY = 0;
 
         // Colors
         this.colors = {
@@ -73,6 +75,9 @@ export class TimelineEditor {
         this.canvas.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
         this.canvas.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
         this.canvas.addEventListener('touchend', (e) => this.onTouchEnd(e));
+
+        // Wheel Events
+        this.canvas.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
 
         // Prevent context menu
         this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -149,7 +154,11 @@ export class TimelineEditor {
             
             for (let i = 0; i < paths.length; i++) {
                 const path = paths[i];
-                const pathY = startY + (i * (trackHeight + spacing));
+                const pathY = startY + (i * (trackHeight + spacing)) - this.scrollY;
+                
+                // Only interact if visible (within track area)
+                if (pathY + trackHeight < startY || pathY > this.canvas.height) continue;
+
                 const startX = this.timeToX(path.startTime);
                 const endX = this.timeToX(path.endTime);
                 
@@ -257,7 +266,10 @@ export class TimelineEditor {
             const startY = 70;
              for (let i = 0; i < paths.length; i++) {
                 const path = paths[i];
-                const pathY = startY + (i * (trackHeight + spacing));
+                const pathY = startY + (i * (trackHeight + spacing)) - this.scrollY;
+                
+                if (pathY + trackHeight < startY || pathY > this.canvas.height) continue;
+
                 const startX = this.timeToX(path.startTime);
                 const endX = this.timeToX(path.endTime);
                 
@@ -287,8 +299,13 @@ export class TimelineEditor {
     }
 
     onWheel(e) {
-        // Disabled scrolling/zooming as per request to "squeeze fit"
         e.preventDefault();
+        
+        // Vertical Scroll
+        const scrollAmount = e.deltaY;
+        this.scrollY = Math.max(0, Math.min(this.maxScrollY, this.scrollY + scrollAmount));
+        
+        this.render();
     }
 
     // Snap time to nearest frame interval
@@ -510,28 +527,25 @@ export class TimelineEditor {
         const headerHeight = 70; // Keyframes area + buffer
         const availableHeight = this.canvas.height - headerHeight - 10; // 10px padding bottom
         
-        let trackHeight = 24;
-        let spacing = 4;
+        const trackHeight = 24;
+        const spacing = 4;
+        const startY = headerHeight;
         
-        if (paths.length > 0) {
-            // Calculate ideal height to fit all
-            const totalRequired = paths.length * (trackHeight + spacing);
-            
-            if (totalRequired > availableHeight) {
-                // Shrink!
-                const availablePerTrack = availableHeight / paths.length;
-                trackHeight = Math.max(4, availablePerTrack - spacing); // Min 4px
-                spacing = 2; // Reduce spacing
-            }
-        }
+        // Calculate max scroll
+        const totalHeight = paths.length * (trackHeight + spacing);
+        this.maxScrollY = Math.max(0, totalHeight - availableHeight);
         
-        this.currentTrackHeight = trackHeight; // Store for hit testing
+        this.currentTrackHeight = trackHeight; 
         this.currentTrackSpacing = spacing;
         
-        const startY = headerHeight; 
+        // Clip to track area
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, startY, this.canvas.width, availableHeight + 10);
+        ctx.clip();
         
         paths.forEach((path, index) => {
-            const y = startY + (index * (trackHeight + spacing));
+            const y = startY + (index * (trackHeight + spacing)) - this.scrollY;
             
             // Calculate X based on start/end
             const startX = this.timeToX(path.startTime);
@@ -604,6 +618,38 @@ export class TimelineEditor {
                 ctx.restore();
             }
         });
+        
+        ctx.restore(); // End clipping
+        
+        // Draw scrollbar if needed
+        if (this.maxScrollY > 0) {
+            this.drawScrollbar(startY, availableHeight, totalHeight);
+        }
+    }
+
+    drawScrollbar(startY, availableHeight, totalHeight) {
+        const ctx = this.ctx;
+        const width = this.canvas.width;
+        
+        const scrollbarWidth = 6;
+        const scrollbarPadding = 4;
+        const scrollbarTrackHeight = availableHeight;
+        
+        // Bar height propotional to visible area
+        const barHeight = Math.max(20, (availableHeight / totalHeight) * scrollbarTrackHeight);
+        const barY = startY + (this.scrollY / totalHeight) * scrollbarTrackHeight;
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(width - scrollbarWidth - scrollbarPadding, startY, scrollbarWidth, scrollbarTrackHeight, 3);
+        else ctx.rect(width - scrollbarWidth - scrollbarPadding, startY, scrollbarWidth, scrollbarTrackHeight);
+        ctx.fill();
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(width - scrollbarWidth - scrollbarPadding, barY, scrollbarWidth, barHeight, 3);
+        else ctx.rect(width - scrollbarWidth - scrollbarPadding, barY, scrollbarWidth, barHeight);
+        ctx.fill();
     }
 
     drawPlayhead() {

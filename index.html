@@ -267,10 +267,21 @@
             <div class="property-group">
               <label>品質</label>
               <select id="export-quality">
+                <option value="ultra">最高品質 (Ultra)</option>
                 <option value="high" selected>高品質</option>
                 <option value="medium">中品質</option>
                 <option value="low">低品質</option>
               </select>
+            </div>
+            <div class="property-group">
+              <label>並列処理数 (サーバーのみ)</label>
+              <input type="number" id="export-concurrency" min="1" max="16" value="4" style="width: 100%; padding: 8px; border: 1px solid #444; background: #2a2a2a; color: #fff; border-radius: 4px;">
+              <small style="color: #888; font-size: 11px;">推奨: 4-8 (CPUコア数に応じて調整)</small>
+            </div>
+            <div class="property-group">
+              <label>描画待機時間 (ms)</label>
+              <input type="number" id="export-wait-time" min="0" max="5000" value="500" style="width: 100%; padding: 8px; border: 1px solid #444; background: #2a2a2a; color: #fff; border-radius: 4px;">
+              <small style="color: #888; font-size: 11px;">地図タイルの読み込みを待つ時間。画質優先なら500-1000推奨。</small>
             </div>
             <div id="export-progress" style="display: none">
               <div class="progress-bar">

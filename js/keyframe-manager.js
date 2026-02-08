@@ -64,6 +64,20 @@ export class KeyframeManager {
         }
     }
 
+    getKeyframes() {
+        return this.keyframes;
+    }
+
+    setKeyframes(keyframes) {
+        // Reconstruct Keyframe objects if needed, or assume data is clean
+        // Ideally use Keyframe.fromJSON if data comes from server/clean JSON
+        this.keyframes = keyframes.map(k => {
+            return k instanceof Keyframe ? k : Keyframe.fromJSON(k);
+        });
+        this.sortKeyframes();
+        this.emit('keyframesChanged', this.keyframes);
+    }
+
     // Add a keyframe
     addKeyframe(keyframe) {
         this.keyframes.push(keyframe);

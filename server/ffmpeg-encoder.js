@@ -1,5 +1,9 @@
 const ffmpeg = require('fluent-ffmpeg');
+const ffmpegStatic = require('ffmpeg-static');
 const path = require('path');
+
+// Tell fluent-ffmpeg where the ffmpeg binary is located
+ffmpeg.setFfmpegPath(ffmpegStatic);
 
 /**
  * Encode video from frames using FFmpeg
@@ -13,6 +17,7 @@ function encodeVideo(frameDir, outputPath, fps = 30, quality = 'high') {
     return new Promise((resolve, reject) => {
         // Quality settings
         const qualitySettings = {
+            ultra: { crf: 6, preset: 'slower' },
             high: { crf: 18, preset: 'slow' },
             medium: { crf: 23, preset: 'medium' },
             low: { crf: 28, preset: 'fast' }
