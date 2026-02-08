@@ -122,6 +122,10 @@ export class AnimationController {
         return this.isPlaying;
     }
 
+    getCurrentTime() {
+        return this.currentTime;
+    }
+
     setFPS(fps) {
         this.fps = fps;
         this.frameInterval = 1000 / this.fps;
